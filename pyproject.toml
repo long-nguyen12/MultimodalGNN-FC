@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "graph-mocheg"
+version = "0.1.0"
+description = "Graph-based multimodal fact checking with gold MOCHEG evidence"
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.6", "torchvision>=0.21", "torch-geometric>=2.6", "transformers>=5.2",
+  "accelerate>=1.0", "Pillow>=10", "scikit-learn>=1.4", "networkx>=3.2"
+]
+
+[project.optional-dependencies]
+explanation-metrics = ["rouge-score>=0.1.2", "bert-score>=0.3.13"]
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+
