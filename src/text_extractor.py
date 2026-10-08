@@ -10,10 +10,11 @@ import torch
 from transformers import AutoProcessor, AutoModelForImageTextToText
 
 TEXT_PROMPT = (
-    "Extract literal named entities from the text. Return ONLY JSON with an entities array. "
+    'Extract literal named entities from the text. Return ONLY a JSON object: '
+    '{"entities": [{"text": "exact substring", "type": "PERSON"}]}. '
     "Each item has text (an exact substring) and type: PERSON, LOCATION, DATE, or ORGANIZATION. "
     "Do not infer missing facts, use outside knowledge, assess truthfulness, or return a verdict. "
-    "Do not resolve relative dates. Return an empty entities array when there are no entities.\nText:\n"
+    'Do not resolve relative dates. Return {"entities": []} when there are no entities.\nText:\n'
 )
 
 
@@ -22,6 +23,8 @@ def parse_json(response):
     if response.startswith("```"):
         response = re.sub(r"^```(?:json)?\s*|\s*```$", "", response, flags=re.I)
     payload = json.loads(response)
+    if not isinstance(payload, dict):
+        raise ValueError("Expected a JSON object")
     return payload
 
 
@@ -62,19 +65,29 @@ class QwenBackend:
         self.load()
         return self.processor.tokenizer
 
-    def generate(self, messages):
+    def generate(self, messages, image=None):
         self.load()
-        inputs = self.processor.apply_chat_template(
+        prompt = self.processor.tokenizer.apply_chat_template(
             messages,
-            tokenize=True,
+            chat_template=self.processor.chat_template,
+            tokenize=False,
             add_generation_prompt=True,
             enable_thinking=False,
-            return_dict=True,
+        )
+        inputs = self.processor(
+            text=prompt,
+            images=image,
             return_tensors="pt",
         ).to(self.device)
+        pad_token_id = self.processor.tokenizer.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = self.processor.tokenizer.eos_token_id
         with torch.inference_mode():
             result = self.model.generate(
-                **inputs, do_sample=False, max_new_tokens=self.max_new_tokens
+                **inputs,
+                do_sample=False,
+                max_new_tokens=self.max_new_tokens,
+                pad_token_id=pad_token_id,
             )
         input_length = inputs["input_ids"].shape[-1]
         generated_tokens = result[0, input_length:]
@@ -97,7 +110,7 @@ class QwenBackend:
                     ],
                 }
             ]
-            return self.generate(messages)
+            return self.generate(messages, image=image)
 
     def unload(self):
         self.model = None
@@ -145,6 +158,8 @@ class TextExtractor:
                     pending = []
                     pending_keys = set()
                     for item in payload["entities"]:
+                        if not isinstance(item, dict):
+                            raise ValueError("Invalid entity object")
                         literal = item.get("text", "")
                         raw_type = str(item.get("type", "")).upper()
                         entity_type = aliases.get(raw_type, raw_type)
