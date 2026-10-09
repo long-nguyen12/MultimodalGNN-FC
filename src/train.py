@@ -10,10 +10,11 @@ import random
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 
 from .ablations import ABLATIONS
 from .baseline import BaselineModel
-from .evaluate import build_model, evaluate_model, summarize_seeds, write_evaluation
+from .evaluate import build_model, evaluate_model, write_evaluation
 
 
 @dataclass
@@ -58,8 +59,6 @@ def train_run(config):
     manifest_path = root / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     validate_training_cache(config, manifest)
-    if config.epochs < 1 or config.patience < 1:
-        raise ValueError("epochs and patience must be positive")
     seed_everything(config.seed)
     output = Path(config.output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -70,8 +69,7 @@ def train_run(config):
         root, "train", ablation=config.ablation, evidence_only=config.evidence_only
     )
     val_data = GraphDataset(root, "val", ablation=config.ablation)
-    if not len(train_data) or not len(val_data):
-        raise ValueError("Both train and validation caches must contain samples")
+    
     shuffle_generator = torch.Generator().manual_seed(config.seed)
     train_loader = DataLoader(
         train_data,
@@ -106,18 +104,20 @@ def train_run(config):
         model.train()
         total_loss = 0.0
         sample_count = 0
-        for batch, labels in train_loader:
+        progress = tqdm(train_loader, desc=f"Train {epoch}/{config.epochs}")
+        for batch, labels in progress:
             batch = batch.to(config.device)
             labels = labels.to(config.device)
             optimizer.zero_grad(set_to_none=True)
             loss = torch.nn.functional.cross_entropy(model(batch), labels)
-            if not torch.isfinite(loss):
-                raise FloatingPointError("Training loss is not finite")
             loss.backward()
             optimizer.step()
             total_loss += float(loss.detach()) * labels.numel()
             sample_count += labels.numel()
-        val_metrics, val_predictions = evaluate_model(model, val_loader, config.device)
+            progress.set_postfix(loss=total_loss / sample_count)
+        val_metrics, val_predictions = evaluate_model(
+            model, val_loader, config.device, desc=f"Val {epoch}/{config.epochs}"
+        )
         epoch_metrics = {
             "epoch": epoch,
             "train_loss": total_loss / sample_count,
@@ -167,23 +167,13 @@ def main(argv=None):
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--patience", type=int, default=10)
-    parser.add_argument("--seeds", nargs="+", type=int, default=[42, 43, 44])
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--ablation", choices=ABLATIONS, default="none")
     parser.add_argument("--evidence-only", action="store_true")
     args = vars(parser.parse_args(argv))
-    seeds = args.pop("seeds")
-    output_dir = Path(args["output_dir"])
-    seed_metrics = []
-    for seed in seeds:
-        run_args = args.copy()
-        run_args["seed"] = seed
-        run_args["output_dir"] = str(output_dir / f"seed_{seed}")
-        config = TrainConfig(**run_args)
-        seed_metrics.append(train_run(config))
-    (output_dir / "seed_summary.json").write_text(
-        json.dumps(summarize_seeds(seed_metrics), indent=2), encoding="utf-8"
-    )
+    args["output_dir"] = str(Path(args["output_dir"]) / f"seed_{args['seed']}")
+    train_run(TrainConfig(**args))
 
 
 if __name__ == "__main__":

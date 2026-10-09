@@ -61,7 +61,7 @@ def build_graphs(
                 max_image_side=config.max_image_side,
                 seed=config.seed,
             )
-    # Include every gold image so the namespace stays stable across split
+    # Include every gold image so compatibility is stable across split
     # selection and changes when any underlying pixels change.
     all_image_hashes = {}
     for split in ("train", "val", "test"):
@@ -121,11 +121,15 @@ def build_graphs(
         ],
     }
     graph_fingerprint = fingerprint(graph_metadata)
-    output = Path(graph_root) / graph_fingerprint[:16]
+    output = Path(graph_root)
     output.mkdir(parents=True, exist_ok=True)
     manifest_path = output / "manifest.json"
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest["fingerprint"] != graph_fingerprint:
+            raise ValueError(
+                f"Incompatible graph cache: {manifest_path}. Choose another --graph-root."
+            )
     else:
         manifest = {
             "fingerprint": graph_fingerprint,
@@ -178,11 +182,14 @@ def build_graphs(
         start_memory()
         started = time.perf_counter()
         for number, (sample, _) in enumerate(selected, 1):
-            texts = [sample.claim_text] + [
-                evidence.text for evidence in sample.text_evidence
+            claim_dir = Path(sample.split) / sample.claim_id
+            texts = [("claim", sample.claim_text)] + [
+                (f"text_{evidence.evidence_id}", evidence.text)
+                for evidence in sample.text_evidence
             ]
-            for text in texts:
+            for name, text in texts:
                 extraction_cache.get_or_compute(
+                    claim_dir / name,
                     {"kind": "text", "text": text},
                     lambda text=text: text_extractor.extract(text),
                 )
@@ -206,7 +213,9 @@ def build_graphs(
                             "errors": [{"error": str(exc)}],
                         }
 
-                extraction_cache.get_or_compute(key, extract_image)
+                extraction_cache.get_or_compute(
+                    claim_dir / f"image_{image.image_id}", key, extract_image
+                )
             print(
                 f"extraction {number}/{len(selected)} {sample.split}/{sample.claim_id}",
                 flush=True,
@@ -226,9 +235,9 @@ def build_graphs(
     start_memory()
     started = time.perf_counter()
 
-    def encoded_text(text):
+    def encoded_text(name, text):
         return feature_cache.get_or_compute(
-            {"kind": "text", "text": text}, lambda: encoder.encode_text(text)
+            name, {"kind": "text", "text": text}, lambda: encoder.encode_text(text)
         )
 
     def require_extracted():
@@ -236,6 +245,7 @@ def build_graphs(
 
     for number, (sample, target) in enumerate(selected, 1):
         claim_key = (sample.split, sample.claim_id)
+        claim_dir = Path(sample.split) / sample.claim_id
         image_hashes = image_hashes_by_claim[claim_key]
         input_hash = fingerprint({"sample": asdict(sample), "images": image_hashes})
         record = records_by_claim.get(claim_key)
@@ -250,7 +260,7 @@ def build_graphs(
                 continue
 
         cached_features = {
-            "claim": encoded_text(sample.claim_text),
+            "claim": encoded_text(claim_dir / "claim", sample.claim_text),
             "texts": {},
             "images": {},
             "text_extractions": {},
@@ -259,27 +269,32 @@ def build_graphs(
             "concept_features": {},
             "errors": [],
         }
-        owners = [("claim:0", sample.claim_text)]
+        owners = [("claim:0", "claim", sample.claim_text)]
         for index, evidence in enumerate(sample.text_evidence):
-            cached_features["texts"][evidence.evidence_id] = encoded_text(evidence.text)
-            owners.append((f"evidence_text:{index}", evidence.text))
+            name = f"text_{evidence.evidence_id}"
+            cached_features["texts"][evidence.evidence_id] = encoded_text(
+                claim_dir / name, evidence.text
+            )
+            owners.append((f"evidence_text:{index}", name, evidence.text))
 
         if extraction_cache:
-            for owner, text in owners:
+            for owner, name, text in owners:
                 extraction = extraction_cache.get_or_compute(
-                    {"kind": "text", "text": text}, require_extracted
+                    claim_dir / name, {"kind": "text", "text": text}, require_extracted
                 )
                 cached_features["text_extractions"][owner] = extraction
                 for error in extraction.get("errors", []):
                     cached_features["errors"].append({"owner": owner, **error})
-                for entity in extraction["entities"]:
+                for index, entity in enumerate(extraction["entities"]):
                     cached_features["entity_features"][entity["text"]] = encoded_text(
+                        claim_dir / f"entity_{name}_{index}",
                         entity["text"]
                     )
 
         for image in sample.image_evidence:
             try:
                 image_features = feature_cache.get_or_compute(
+                    claim_dir / f"image_{image.image_id}",
                     {"kind": "image", "content_hash": image_hashes[image.image_id]},
                     lambda image=image: encoder.encode_image(
                         data_root / image.relative_path
@@ -304,14 +319,17 @@ def build_graphs(
                 if image_hashes[image.image_id] == "missing":
                     extraction_key["missing_path"] = image.relative_path
                 extraction = extraction_cache.get_or_compute(
-                    extraction_key, require_extracted
+                    claim_dir / f"image_{image.image_id}",
+                    extraction_key,
+                    require_extracted,
                 )
                 cached_features["image_extractions"][image.image_id] = extraction
                 for error in extraction.get("errors", []):
                     cached_features["errors"].append({"owner": image.image_id, **error})
                 for group in ("objects", "persons", "landmarks", "ocr"):
-                    for concept in extraction[group]:
+                    for index, concept in enumerate(extraction[group]):
                         cached_features["concept_features"][concept] = encoded_text(
+                            claim_dir / f"visual_{image.image_id}_{group}_{index}",
                             concept
                         )
 

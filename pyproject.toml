@@ -9,7 +9,7 @@ description = "Graph-based multimodal fact checking with gold MOCHEG evidence"
 requires-python = ">=3.10"
 dependencies = [
   "torch>=2.6", "torchvision>=0.21", "torch-geometric>=2.6", "transformers>=5.2",
-  "accelerate>=1.0", "Pillow>=10", "scikit-learn>=1.4", "networkx>=3.2"
+  "accelerate>=1.0", "Pillow>=10", "scikit-learn>=1.4", "networkx>=3.2", "tqdm>=4.66"
 ]
 
 [project.optional-dependencies]

@@ -8,6 +8,7 @@ import numpy as np
 import torch
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 
 from .baseline import BaselineModel
 from .hetero_gnn import GraphModel
@@ -77,11 +78,11 @@ def graph_modalities(batch):
 
 
 @torch.no_grad()
-def evaluate_model(model, loader, device="cpu"):
+def evaluate_model(model, loader, device="cpu", desc="Evaluation"):
     model.eval()
     rows = []
     total_loss = 0.0
-    for batch, labels in loader:
+    for batch, labels in tqdm(loader, desc=desc):
         modalities = graph_modalities(batch)
         claim_ids = batch.claim_id
         batch = batch.to(device)
@@ -132,18 +133,6 @@ def write_evaluation(output_dir, metrics, rows):
     (output / "errors.json").write_text(json.dumps(errors, indent=2), encoding="utf-8")
 
 
-def summarize_seeds(metrics):
-    summary = {"runs": len(metrics)}
-    for name in ("accuracy", "macro_f1"):
-        values = [result[name] for result in metrics]
-        summary[name] = {
-            "mean": float(np.mean(values)),
-            "std": float(np.std(values)),
-            "values": values,
-        }
-    return summary
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", required=True)
@@ -165,7 +154,7 @@ def main(argv=None):
         root, args.split, ablation=train_config.get("ablation", "none")
     )
     loader = DataLoader(dataset, batch_size=args.batch_size, collate_fn=collate_graphs)
-    metrics, rows = evaluate_model(model, loader, args.device)
+    metrics, rows = evaluate_model(model, loader, args.device, desc=f"Evaluate {args.split}")
     metrics.update({
         "split": args.split,
         "cache_fingerprint": manifest["fingerprint"],

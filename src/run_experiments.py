@@ -1,4 +1,4 @@
-"""Run selected model/ablation/seed comparisons using the shared cached trainer."""
+"""Run selected model/ablation comparisons using the shared cached trainer."""
 
 import argparse
 import csv
@@ -6,7 +6,6 @@ from dataclasses import asdict, replace
 import json
 from pathlib import Path
 
-import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
@@ -43,7 +42,7 @@ def applicable(model, ablation):
 
 
 def experiment_matrix(
-    base, models, ablations=("none",), seeds=(42, 43, 44), include_evidence_only=False
+    base, models, ablations=("none",), include_evidence_only=False
 ):
     """Omit combinations whose ablation changes no input or model behavior."""
     for values, choices, name in ((models, MODELS, "model"), (ablations, ABLATIONS, "ablation")):
@@ -53,8 +52,6 @@ def experiment_matrix(
             or any(value not in choices for value in values)
         ):
             raise ValueError(f"Invalid or duplicate {name} selection")
-    if not seeds or len(set(seeds)) != len(seeds) or any(seed < 0 for seed in seeds):
-        raise ValueError("Seeds must be distinct nonnegative integers")
     configs = []
     training_controls = (False, True) if include_evidence_only else (False,)
     for model in models:
@@ -63,17 +60,15 @@ def experiment_matrix(
                 continue
             for evidence_only in training_controls:
                 group = "evidence_only" if evidence_only else "all_train"
-                for seed in seeds:
-                    output = Path(base.output_dir) / model / ablation / group / f"seed_{seed}"
-                    config = replace(
-                        base,
-                        model=model,
-                        ablation=ablation,
-                        seed=seed,
-                        evidence_only=evidence_only,
-                        output_dir=str(output),
-                    )
-                    configs.append(config)
+                output = Path(base.output_dir) / model / ablation / group / f"seed_{base.seed}"
+                config = replace(
+                    base,
+                    model=model,
+                    ablation=ablation,
+                    evidence_only=evidence_only,
+                    output_dir=str(output),
+                )
+                configs.append(config)
     if not configs:
         raise ValueError("No applicable model/ablation combinations were selected")
     return configs
@@ -113,31 +108,18 @@ def prevalidate(configs, evaluate_test=False):
 
 
 def aggregate_results(rows):
-    groups = {}
-    for row in rows:
-        key = (row["model"], row["ablation"], row["evidence_only"], row["split"])
-        groups.setdefault(key, []).append(row)
+    baselines = {
+        (row["model"], row["evidence_only"], row["split"]): row["macro_f1"]
+        for row in rows if row["ablation"] == "none"
+    }
     summary = []
-    for (model, ablation, evidence_only, split), records in groups.items():
+    for row in rows:
         result = {
-            "model": model,
-            "ablation": ablation,
-            "evidence_only": evidence_only,
-            "split": split,
-            "seeds": len(records),
+            key: row[key]
+            for key in ("model", "ablation", "evidence_only", "seed", "split", "accuracy", "macro_f1")
         }
-        for metric in ("accuracy", "macro_f1"):
-            values = [row[metric] for row in records]
-            result[metric + "_mean"] = float(np.mean(values))
-            result[metric + "_std"] = float(np.std(values))
-        baseline_rows = groups.get((model, "none", evidence_only, split))
-        if baseline_rows:
-            baseline_scores = [row["macro_f1"] for row in baseline_rows]
-            result["macro_f1_delta"] = (
-                result["macro_f1_mean"] - float(np.mean(baseline_scores))
-            )
-        else:
-            result["macro_f1_delta"] = ""
+        baseline = baselines.get((row["model"], row["evidence_only"], row["split"]))
+        result["macro_f1_delta"] = row["macro_f1"] - baseline if baseline is not None else ""
         summary.append(result)
     return summary
 
@@ -202,7 +184,7 @@ def main(argv=None):
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--models", nargs="+", choices=MODELS, required=True)
     parser.add_argument("--ablations", nargs="+", choices=ABLATIONS, default=["none"])
-    parser.add_argument("--seeds", nargs="+", type=int, default=[42, 43, 44])
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--include-evidence-only", action="store_true")
     parser.add_argument(
         "--evaluate-test",
@@ -220,12 +202,11 @@ def main(argv=None):
     args = vars(parser.parse_args(argv))
     models = args.pop("models")
     ablations = args.pop("ablations")
-    seeds = args.pop("seeds")
     include_evidence_only = args.pop("include_evidence_only")
     evaluate_test = args.pop("evaluate_test")
     base_config = TrainConfig(**args)
     configs = experiment_matrix(
-        base_config, models, ablations, seeds, include_evidence_only
+        base_config, models, ablations, include_evidence_only
     )
     run_matrix(configs, base_config.output_dir, evaluate_test)
 
