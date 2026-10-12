@@ -11,20 +11,34 @@ import torch
 from transformers import AutoProcessor, AutoModelForImageTextToText
 
 TEXT_PROMPT = (
-    'Read the whole text and extract all literal named entities of these four types: '
-    'PERSON (named people), LOCATION (named places), DATE (explicit dates), '
-    'ORGANIZATION (companies, agencies, or institutions). '
-    'Do not classify diseases, viruses, products, or model names as ORGANIZATION. '
-    'Return ONLY a JSON object with an entities array. '
-    'For example, for "Marie Curie visited the Royal Society in London in 1911", return '
-    '{"entities": [{"text": "Marie Curie", "type": "PERSON"}, '
-    '{"text": "Royal Society", "type": "ORGANIZATION"}, '
-    '{"text": "London", "type": "LOCATION"}, {"text": "1911", "type": "DATE"}]}. '
-    'Each entity text must be an exact substring, preserving its spelling and capitalization. '
-    "Use double-quoted JSON strings and escape quotes inside them. "
-    "Return each entity once, with no spans, markdown, comments, or explanation. "
-    "Do not infer missing facts, use outside knowledge, assess truthfulness, or return a verdict. "
-    'Do not resolve relative dates. Return {"entities": []} when there are no entities.\nText:\n'
+    'Extract every explicit named entity from Text, including short sentences. '
+    'This is name tagging; do not assess whether the statement is true.\n'
+    'Use only these types:\n'
+    '- PERSON: names of individual people; omit job titles from the name.\n'
+    '- LOCATION: named towns, cities, countries, regions, or other places.\n'
+    '- DATE: dates or years explicitly written; do not resolve relative dates.\n'
+    '- ORGANIZATION: named companies, stores, agencies, institutions, and other organizations. '
+    'Include company names used for websites, platforms, or services, even without the word company.\n'
+    'Recognize the names written in Text and copy each one exactly, preserving spelling and case. '
+    'Include names mentioned only once, in negated statements, or in disputed claims. '
+    'Do not add absent names, expand abbreviations, or infer identities or dates. '
+    'Generic occupations, unnamed people or places, money amounts, diseases, viruses, '
+    'and standalone product/model names do not belong to these types.\n'
+    'Return one complete JSON object: {"entities": [{"text": "...", "type": "..."}]}. '
+    'Use each text/type pair once, with double-quoted strings and escaped embedded quotes. '
+    'Return no spans, markdown, comments, reasoning, or verdict.\n'
+    'Example Text: Asha Rao visited Harbor Foods in Riverton in 2024.\n'
+    'Output: {"entities": [{"text": "Asha Rao", "type": "PERSON"}, '
+    '{"text": "Harbor Foods", "type": "ORGANIZATION"}, '
+    '{"text": "Riverton", "type": "LOCATION"}, {"text": "2024", "type": "DATE"}]}\n'
+    'Example Text: Loopline users reported a problem with Pinecrest Analytics.\n'
+    'Output: {"entities": [{"text": "Loopline", "type": "ORGANIZATION"}, '
+    '{"text": "Pinecrest Analytics", "type": "ORGANIZATION"}]}\n'
+    'Example Text: The package is red and costs $20.\n'
+    'Output: {"entities": []}\n'
+    'Before returning an empty array, check Text again for all four types. '
+    'Return {"entities": []} only when none are present. Extract the Text below, not the examples.\n'
+    'Text:\n'
 )
 
 
