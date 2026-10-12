@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 
 from PIL import Image, ImageOps
 import torch
@@ -64,6 +65,7 @@ class QwenBackend:
             .to(self.device)
             .eval()
         )
+        print(f"[qwen] loaded {self.model_id}, device={self.device}, dtype={dtype}", flush=True)
 
     @property
     def tokenizer(self):
@@ -88,16 +90,38 @@ class QwenBackend:
         pad_token_id = self.processor.tokenizer.pad_token_id
         if pad_token_id is None:
             pad_token_id = self.processor.tokenizer.eos_token_id
+        generation_kwargs = {"do_sample": False}
+        if image is not None:
+            torch.manual_seed(self.seed)
+            generation_kwargs.update(
+                do_sample=True, temperature=0.7, top_p=0.8, top_k=20,
+                repetition_penalty=1.1,
+            )
+        if self.device.startswith("cuda"):
+            torch.cuda.synchronize(self.device)
+        started = time.perf_counter()
         with torch.inference_mode():
             result = self.model.generate(
                 **inputs,
-                do_sample=False,
+                **generation_kwargs,
                 max_new_tokens=self.max_new_tokens,
                 pad_token_id=pad_token_id,
             )
         input_length = inputs["input_ids"].shape[-1]
         generated_tokens = result[0, input_length:]
-        return self.processor.decode(generated_tokens, skip_special_tokens=True)
+        response = self.processor.decode(generated_tokens, skip_special_tokens=True)
+        if self.device.startswith("cuda"):
+            torch.cuda.synchronize(self.device)
+        elapsed = time.perf_counter() - started
+        count = generated_tokens.numel()
+        print(
+            f"[qwen:{'image' if image is not None else 'text'}] "
+            f"input_tokens={input_length}, output_tokens={count}, "
+            f"time={elapsed:.2f}s, tokens/s={count / elapsed:.1f}, "
+            f"at_limit={count >= self.max_new_tokens}",
+            flush=True,
+        )
+        return response
 
     def generate_text(self, prompt):
         messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
@@ -144,6 +168,8 @@ class TextExtractor:
         for start in range(0, len(tokens), self.window - self.overlap):
             chunk_tokens = tokens[start : start + self.window]
             chunks.append(tokenizer.decode(chunk_tokens, skip_special_tokens=True))
+            if start + self.window >= len(tokens):
+                break
 
         entities = []
         errors = []
