@@ -3,7 +3,7 @@ from dataclasses import asdict, dataclass
 @dataclass(frozen=True)
 class BuildConfig:
     encoder_id: str = "openai/clip-vit-base-patch32"
-    extractor_id: str = "Qwen/Qwen3.5-4B"
+    extractor_id: str = "Qwen/Qwen3.5-2B"
     device: str = "cuda"
     max_new_tokens: int = 1536
     text_window: int = 2048
