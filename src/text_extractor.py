@@ -11,9 +11,16 @@ import torch
 from transformers import AutoProcessor, AutoModelForImageTextToText
 
 TEXT_PROMPT = (
-    'Extract literal named entities from the text. Return ONLY a JSON object: '
-    '{"entities": [{"text": "exact substring", "type": "PERSON"}]}. '
-    "Each item has text (an exact substring) and type: PERSON, LOCATION, DATE, or ORGANIZATION. "
+    'Read the whole text and extract all literal named entities of these four types: '
+    'PERSON (named people), LOCATION (named places), DATE (explicit dates), '
+    'ORGANIZATION (companies, agencies, or institutions). '
+    'Do not classify diseases, viruses, products, or model names as ORGANIZATION. '
+    'Return ONLY a JSON object with an entities array. '
+    'For example, for "Marie Curie visited the Royal Society in London in 1911", return '
+    '{"entities": [{"text": "Marie Curie", "type": "PERSON"}, '
+    '{"text": "Royal Society", "type": "ORGANIZATION"}, '
+    '{"text": "London", "type": "LOCATION"}, {"text": "1911", "type": "DATE"}]}. '
+    'Each entity text must be an exact substring, preserving its spelling and capitalization. '
     "Use double-quoted JSON strings and escape quotes inside them. "
     "Return each entity once, with no spans, markdown, comments, or explanation. "
     "Do not infer missing facts, use outside knowledge, assess truthfulness, or return a verdict. "
@@ -52,6 +59,20 @@ class QwenBackend:
         self.seed = seed
         self.model = None
         self.processor = None
+        self.generation_parameters = {
+            "text": {"do_sample": False},
+            "image": {
+                "do_sample": True, "temperature": 0.7, "top_p": 0.8,
+                "top_k": 20, "repetition_penalty": 1.1,
+            },
+        }
+        self.generation_stats = {
+            kind: {
+                "calls": 0, "input_tokens": 0, "output_tokens": 0,
+                "seconds": 0.0, "at_limit": 0,
+            }
+            for kind in ("text", "image")
+        }
 
     def load(self):
         if self.model is not None:
@@ -66,6 +87,11 @@ class QwenBackend:
             .eval()
         )
         print(f"[qwen] loaded {self.model_id}, device={self.device}, dtype={dtype}", flush=True)
+        print(
+            f"[qwen] thinking=False, seed={self.seed}, max_new_tokens={self.max_new_tokens}, "
+            f"generation={json.dumps(self.generation_parameters)}",
+            flush=True,
+        )
 
     @property
     def tokenizer(self):
@@ -90,13 +116,10 @@ class QwenBackend:
         pad_token_id = self.processor.tokenizer.pad_token_id
         if pad_token_id is None:
             pad_token_id = self.processor.tokenizer.eos_token_id
-        generation_kwargs = {"do_sample": False}
+        kind = "image" if image is not None else "text"
+        generation_kwargs = self.generation_parameters[kind]
         if image is not None:
             torch.manual_seed(self.seed)
-            generation_kwargs.update(
-                do_sample=True, temperature=0.7, top_p=0.8, top_k=20,
-                repetition_penalty=1.1,
-            )
         if self.device.startswith("cuda"):
             torch.cuda.synchronize(self.device)
         started = time.perf_counter()
@@ -114,8 +137,14 @@ class QwenBackend:
             torch.cuda.synchronize(self.device)
         elapsed = time.perf_counter() - started
         count = generated_tokens.numel()
+        stats = self.generation_stats[kind]
+        stats["calls"] += 1
+        stats["input_tokens"] += input_length
+        stats["output_tokens"] += count
+        stats["seconds"] += elapsed
+        stats["at_limit"] += int(count >= self.max_new_tokens)
         print(
-            f"[qwen:{'image' if image is not None else 'text'}] "
+            f"[qwen:{kind}] "
             f"input_tokens={input_length}, output_tokens={count}, "
             f"time={elapsed:.2f}s, tokens/s={count / elapsed:.1f}, "
             f"at_limit={count >= self.max_new_tokens}",
@@ -161,7 +190,7 @@ class TextExtractor:
 
     def extract(self, text):
         if not text.strip():
-            return {"entities": [], "errors": []}
+            return {"entities": [], "errors": [], "diagnostics": [], "retries": 0}
         tokenizer = self.backend.tokenizer
         tokens = tokenizer.encode(text, add_special_tokens=False)
         chunks = []
@@ -173,12 +202,15 @@ class TextExtractor:
 
         entities = []
         errors = []
+        diagnostics = []
+        retries = 0
         seen = set()
         aliases = {"GPE": "LOCATION", "LOC": "LOCATION", "ORG": "ORGANIZATION"}
         allowed_types = ("PERSON", "LOCATION", "DATE", "ORGANIZATION")
         for chunk_index, chunk in enumerate(chunks):
             retry_note = ""
             for attempt in range(2):
+                retries += attempt
                 prompt = retry_note + TEXT_PROMPT + chunk
                 response = ""
                 try:
@@ -189,6 +221,10 @@ class TextExtractor:
                     # Commit entities only after the whole response is valid.
                     pending = []
                     pending_keys = set()
+                    discarded = {
+                        "invalid_text": 0, "unsupported_type": 0,
+                        "not_in_chunk": 0, "not_in_source": 0, "duplicate": 0,
+                    }
                     for item in payload["entities"]:
                         if not isinstance(item, dict):
                             raise ValueError("Invalid entity object")
@@ -196,20 +232,34 @@ class TextExtractor:
                         raw_type = str(item.get("type", "")).upper()
                         entity_type = aliases.get(raw_type, raw_type)
                         if not isinstance(literal, str) or not literal.strip():
+                            discarded["invalid_text"] += 1
                             continue
                         if entity_type not in allowed_types:
+                            discarded["unsupported_type"] += 1
                             continue
                         if literal not in chunk:
+                            discarded["not_in_chunk"] += 1
                             continue
                         spans = []
                         for match in re.finditer(re.escape(literal), text):
                             spans.append({"start": match.start(), "end": match.end()})
                         key = (literal, entity_type)
-                        if spans and key not in seen and key not in pending_keys:
-                            pending.append(
-                                {"text": literal, "type": entity_type, "spans": spans}
-                            )
-                            pending_keys.add(key)
+                        if not spans:
+                            discarded["not_in_source"] += 1
+                            continue
+                        if key in seen or key in pending_keys:
+                            discarded["duplicate"] += 1
+                            continue
+                        pending.append(
+                            {"text": literal, "type": entity_type, "spans": spans}
+                        )
+                        pending_keys.add(key)
+                    if not pending:
+                        diagnostics.append({
+                            "chunk": chunk_index, "attempt": attempt + 1,
+                            "candidates": len(payload["entities"]),
+                            "discarded": discarded, "response": response,
+                        })
                     entities.extend(pending)
                     seen.update(pending_keys)
                     break
@@ -222,4 +272,7 @@ class TextExtractor:
                         errors.append(
                             {"chunk": chunk_index, "error": str(exc), "response": response}
                         )
-        return {"entities": entities, "errors": errors}
+        return {
+            "entities": entities, "errors": errors,
+            "diagnostics": diagnostics, "retries": retries,
+        }

@@ -44,8 +44,8 @@ def build_graphs(
         )
 
     from .feature_encoder import FeatureEncoder
-    from .text_extractor import QwenBackend, TextExtractor
-    from .image_extractor import ImageExtractor
+    from .text_extractor import QwenBackend, TextExtractor, TEXT_PROMPT
+    from .image_extractor import ImageExtractor, IMAGE_PROMPT
 
     if encoder is None:
         encoder = FeatureEncoder(
@@ -104,7 +104,21 @@ def build_graphs(
 
     # Finish Qwen extraction and release its weights before loading CLIP.
     extraction_cache = None
+    extraction_counts = {
+        kind: {"new": 0, "cached": 0, "retries": 0}
+        for kind in ("text", "image")
+    }
+    qwen_generation = None
     if stage == "full":
+        qwen_generation = {
+            "model_id": backend.model_id,
+            "enable_thinking": False,
+            "seed": backend.seed,
+            "max_new_tokens": backend.max_new_tokens,
+            "parameters": backend.generation_parameters,
+            "stats": backend.generation_stats,
+            "prompts": {"text": TEXT_PROMPT, "image": IMAGE_PROMPT},
+        }
         extraction_cache = ContentCache(Path(cache_root) / "extraction")
         text_extractor = TextExtractor(backend, config.text_window, config.text_overlap)
         image_extractor = ImageExtractor(backend)
@@ -122,6 +136,9 @@ def build_graphs(
                     claim_dir / name,
                     lambda text=text: text_extractor.extract(text),
                 )
+                extraction_counts["text"]["cached" if cache_hit else "new"] += 1
+                if not cache_hit:
+                    extraction_counts["text"]["retries"] += extraction.get("retries", 0)
                 errors = len(extraction.get("errors", []))
                 print(
                     f"[extract:text] {claim_dir}/{name}: {'WARN' if errors else 'OK'} "
@@ -129,6 +146,12 @@ def build_graphs(
                     f"entities={len(extraction['entities'])}, errors={errors}",
                     flush=True,
                 )
+                for diagnostic in extraction.get("diagnostics", []):
+                    print(
+                        f"[extract:text:empty] {claim_dir}/{name}: chunk={diagnostic['chunk']}, "
+                        f"candidates={diagnostic['candidates']}, discarded={diagnostic['discarded']}",
+                        flush=True,
+                    )
             for image in sample.image_evidence:
                 def extract_image(image=image):
                     try:
@@ -147,6 +170,9 @@ def build_graphs(
                 extraction = extraction_cache.get_or_compute(
                     name, extract_image
                 )
+                extraction_counts["image"]["cached" if cache_hit else "new"] += 1
+                if not cache_hit:
+                    extraction_counts["image"]["retries"] += extraction.get("retries", 0)
                 errors = len(extraction.get("errors", []))
                 concepts = sum(len(extraction[group]) for group in ("objects", "persons", "landmarks", "ocr"))
                 print(
@@ -289,6 +315,11 @@ def build_graphs(
 
         graph = builder.build(sample, cached_features)
         provenance = builder.provenance
+        provenance["text_extraction_diagnostics"] = [
+            {"owner": owner, **diagnostic}
+            for owner, extraction in cached_features["text_extractions"].items()
+            for diagnostic in extraction.get("diagnostics", [])
+        ]
         print(
             f"[graph:build] {claim_dir}: OK, "
             f"nodes={len(provenance['nodes'])}, edges={len(provenance['edges'])}",
@@ -343,6 +374,8 @@ def build_graphs(
         "stage": stage,
         "device": config.device,
         "vram": memory,
+        "extraction_counts": extraction_counts,
+        "qwen_generation": qwen_generation,
         "claim_error_count": failed_claims,
         "claim_error_rate": (
             failed_claims / len(selected_records) if selected_records else 0.0
