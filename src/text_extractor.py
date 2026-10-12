@@ -10,6 +10,8 @@ from PIL import Image, ImageOps
 import torch
 from transformers import AutoProcessor, AutoModelForImageTextToText
 
+from .config import BuildConfig
+
 TEXT_PROMPT = (
     'Extract every explicit named entity from Text, including short sentences. '
     'This is name tagging; do not assess whether the statement is true.\n'
@@ -60,7 +62,7 @@ def parse_json(response):
 class QwenBackend:
     def __init__(
         self,
-        model_id="Qwen/Qwen3.5-4B",
+        model_id=BuildConfig.extractor_id,
         device="cuda",
         max_new_tokens=1536,
         max_image_side=1024,

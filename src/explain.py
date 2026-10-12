@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import random
 
+from .config import BuildConfig
 from .schema import EDGE_TYPES, NODE_TYPES, SEMANTIC_RELATIONS, STRUCTURAL_RELATIONS
 
 
@@ -431,7 +432,7 @@ def main(argv=None):
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--generate", action="store_true")
-    parser.add_argument("--model-id", default="Qwen/Qwen3.5-4B")
+    parser.add_argument("--model-id", default=BuildConfig.extractor_id)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument("--faithfulness", action="store_true")
