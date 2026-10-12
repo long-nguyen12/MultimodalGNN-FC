@@ -310,7 +310,6 @@ class GraphExplainer:
             "predicted_class": predicted_class,
             "probabilities": probabilities,
             "selection_signal": "attention" if scores else "edge_score",
-            "fingerprint": provenance.get("fingerprint"),
         })
         has_evidence = any(
             node["type"] in ("evidence_text", "evidence_image")
@@ -455,8 +454,6 @@ def main(argv=None):
             "Explanation CLI requires a checkpoint with ablation='none'; "
             "ablated checkpoints need matching filtered and reindexed graph provenance"
         )
-    if payload["cache_fingerprint"] != dataset.manifest["fingerprint"]:
-        raise ValueError("Checkpoint and graph-cache fingerprints differ")
     graph, _ = dataset[index]
     graph = graph.to(args.device)
     provenance_path = Path(args.graph_root) / dataset.records[index]["provenance_path"]

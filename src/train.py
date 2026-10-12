@@ -133,7 +133,6 @@ def train_run(config):
                 "model_config": model_config,
                 "state_dict": model.state_dict(),
                 "train_config": asdict(config),
-                "cache_fingerprint": manifest["fingerprint"],
                 "best_epoch": epoch,
                 "val_metrics": val_metrics,
             }

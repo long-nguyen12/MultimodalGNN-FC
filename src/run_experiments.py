@@ -76,7 +76,6 @@ def experiment_matrix(
 
 def prevalidate(configs, evaluate_test=False):
     """Reject invalid cache/split settings before the first training run."""
-    fingerprints = {}
     splits = ("train", "val", "test") if evaluate_test else ("train", "val")
     for config in configs:
         manifest_path = Path(config.graph_root) / "manifest.json"
@@ -103,8 +102,6 @@ def prevalidate(configs, evaluate_test=False):
             )
             if not len(dataset):
                 raise ValueError(f"Empty {split} cache for {config.model}/{config.ablation}")
-        fingerprints[config.output_dir] = manifest["fingerprint"]
-    return fingerprints
 
 
 def aggregate_results(rows):
@@ -133,7 +130,7 @@ def write_table(path, rows):
 
 
 def run_matrix(configs, output_dir, evaluate_test=False):
-    fingerprints = prevalidate(configs, evaluate_test)
+    prevalidate(configs, evaluate_test)
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     matrix_manifest = {
@@ -148,7 +145,7 @@ def run_matrix(configs, output_dir, evaluate_test=False):
         metrics = {"val": train_run(config)}
         checkpoint_path = Path(config.output_dir) / "best.pt"
         if evaluate_test:
-            model, payload = load_model(checkpoint_path, config.device)
+            model, _ = load_model(checkpoint_path, config.device)
             test_data = GraphDataset(config.graph_root, "test", ablation=config.ablation)
             test_loader = DataLoader(
                 test_data, batch_size=config.batch_size, collate_fn=collate_graphs
@@ -170,7 +167,6 @@ def run_matrix(configs, output_dir, evaluate_test=False):
                 "count": values["count"],
                 "accuracy": values["accuracy"],
                 "macro_f1": values["macro_f1"],
-                "cache_fingerprint": fingerprints[config.output_dir],
                 "checkpoint": str(checkpoint_path),
             })
         write_table(output / "experiment_results.csv", results)

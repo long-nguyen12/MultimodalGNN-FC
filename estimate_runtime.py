@@ -10,7 +10,7 @@ import time
 import torch
 from tqdm.auto import tqdm
 
-from src.cache import atomic_json, file_hash
+from src.cache import atomic_json
 from src.config import BuildConfig
 from src.dataset import MochegDataset, SPLITS, modality_group
 from src.feature_encoder import FeatureEncoder
@@ -19,8 +19,11 @@ from src.image_extractor import ImageExtractor
 from src.text_extractor import QwenBackend, TextExtractor
 
 
-def estimate_runtime(data_root, samples=5, device="cuda", stage="full", output="outputs/runtime_estimate.json"):
-    config = BuildConfig(device=device)
+def estimate_runtime(
+    data_root, samples=5, device="cuda", stage="full", output="outputs/runtime_estimate.json",
+    extractor_id=BuildConfig.extractor_id,
+):
+    config = BuildConfig(device=device, extractor_id=extractor_id)
     data_root = Path(data_root)
 
     def synchronize():
@@ -30,20 +33,13 @@ def estimate_runtime(data_root, samples=5, device="cuda", stage="full", output="
     started = time.perf_counter()
     groups = defaultdict(list)
     split_counts = {}
-    print("Reading datasets and hashing gold images...", flush=True)
+    print("Reading datasets...", flush=True)
     for split in SPLITS:
         dataset = MochegDataset(data_root, split)
         split_counts[split] = len(dataset)
         for sample in dataset.samples:
             groups[modality_group(sample)].append(sample)
-    image_hashes = {}
-    for group in groups.values():
-        for sample in group:
-            for image in sample.image_evidence:
-                if image.relative_path not in image_hashes:
-                    path = data_root / image.relative_path
-                    image_hashes[image.relative_path] = file_hash(path) if path.is_file() else "missing"
-    dataset_hash_seconds = time.perf_counter() - started
+    dataset_seconds = time.perf_counter() - started
 
     rng = random.Random(config.seed)
     rows = []
@@ -165,12 +161,12 @@ def estimate_runtime(data_root, samples=5, device="cuda", stage="full", output="
         }
         for phase in phases:
             estimated[phase] += len(claims) * means[phase]
-    total_seconds = dataset_hash_seconds + model_startup_seconds + sum(estimated.values())
+    total_seconds = dataset_seconds + model_startup_seconds + sum(estimated.values())
     report = {
         "scope": "Fresh-cache processing estimate; excludes cache, graph and manifest writes.",
         "stage": stage, "config": asdict(config), "split_claims": split_counts,
         "sample_size_per_modality": samples, "sampled_claims": len(rows),
-        "dataset_and_hash_seconds": dataset_hash_seconds,
+        "dataset_read_seconds": dataset_seconds,
         "model_load_and_warmup_seconds": model_startup_seconds,
         "estimated_processing_seconds": estimated,
         "estimated_total_seconds": total_seconds, "estimated_total_hours": total_seconds / 3600,
@@ -196,6 +192,7 @@ def main():
     parser.add_argument("--data-root", default="mocheg")
     parser.add_argument("--samples", type=int, default=5, help="Random claims per modality group (seed 42)")
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--extractor-id", default=BuildConfig.extractor_id)
     parser.add_argument("--stage", choices=("full", "features"), default="full")
     parser.add_argument("--output", default="outputs/runtime_estimate.json")
     args = parser.parse_args()

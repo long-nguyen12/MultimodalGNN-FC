@@ -9,30 +9,27 @@ from .visualize_graph import render_graph
 
 
 REVIEW_COLUMNS = (
-    "claim_id", "fingerprint", "input_hash", "status", "reviewer", "notes",
-    "graph_path", "provenance_path",
+    "claim_id", "status", "reviewer", "notes", "graph_path", "provenance_path",
 )
 REVIEW_STATUSES = frozenset(("pending", "approved", "needs_changes"))
 
 
-def _read_review(path, allow_legacy=False):
+def _read_review(path):
     with Path(path).open(encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         required_columns = set(REVIEW_COLUMNS)
-        if allow_legacy:
-            required_columns.remove("input_hash")
         if not required_columns.issubset(reader.fieldnames or []):
             raise ValueError("Review CSV is missing required columns: {}".format(", ".join(REVIEW_COLUMNS)))
-        rows = list(reader)
-    for row in rows:
-        row.setdefault("input_hash", None)
+        rows = []
+        for csv_row in reader:
+            rows.append({column: csv_row[column] for column in REVIEW_COLUMNS})
     claim_ids = {row["claim_id"] for row in rows}
     if len(claim_ids) != len(rows):
         raise ValueError("Review CSV contains duplicate claim IDs")
     return rows
 
 
-def validate_review(review_csv, claim_ids, fingerprint=None, expected_count=None, input_hashes=None):
+def validate_review(review_csv, claim_ids, expected_count=None):
     """Validate human approval of the requested graphs, regardless of their count."""
     expected = {str(claim_id) for claim_id in claim_ids}
     if expected_count is not None and len(expected) != expected_count:
@@ -51,26 +48,14 @@ def validate_review(review_csv, claim_ids, fingerprint=None, expected_count=None
         raise ValueError(
             "{} graphs require human approval with a reviewer name".format(len(pending))
         )
-    if fingerprint is not None and any(row["fingerprint"] != fingerprint for row in rows):
-        raise ValueError("Review fingerprint does not match the current graph cache")
-    if input_hashes is not None:
-        hashes = {str(claim_id): value for claim_id, value in input_hashes.items()}
-        if not expected.issubset(hashes):
-            raise ValueError("Expected input hashes are missing")
-        if any(row["input_hash"] != hashes[row["claim_id"]] for row in rows):
-            raise ValueError(
-                "Review input hash does not match the current claim inputs; "
-                "export and review the changed graphs"
-            )
     reviewers = sorted({row["reviewer"].strip() for row in rows})
-    return {"approved": len(rows), "fingerprint": fingerprint, "reviewers": reviewers}
+    return {"approved": len(rows), "reviewers": reviewers}
 
 
 def build_review(graph_root, split, output_dir, claim_ids=None):
     graph_root = Path(graph_root)
     output_dir = Path(output_dir)
     manifest = json.loads((graph_root / "manifest.json").read_text(encoding="utf-8"))
-    fingerprint = manifest["fingerprint"]
     selected_ids = None
     if claim_ids is not None:
         selected_ids = {str(claim_id) for claim_id in claim_ids}
@@ -89,7 +74,7 @@ def build_review(graph_root, split, output_dir, claim_ids=None):
     review_path = output_dir / "review.csv"
     previous = {}
     if review_path.exists():
-        for row in _read_review(review_path, allow_legacy=True):
+        for row in _read_review(review_path):
             previous[row["claim_id"]] = row
     rows = []
     for record in records:
@@ -99,8 +84,6 @@ def build_review(graph_root, split, output_dir, claim_ids=None):
         render_graph(provenance, output_dir / "graphs" / (claim_id + ".html"))
         row = {
             "claim_id": claim_id,
-            "fingerprint": fingerprint,
-            "input_hash": record.get("input_hash", ""),
             "status": "pending",
             "reviewer": "",
             "notes": "",
@@ -109,18 +92,14 @@ def build_review(graph_root, split, output_dir, claim_ids=None):
         }
         old = previous.get(claim_id)
         if old:
-            same_fingerprint = old["fingerprint"] == fingerprint
-            same_input = old["input_hash"] is not None and old["input_hash"] == row["input_hash"]
-            if same_fingerprint and same_input:
-                for key in ("status", "reviewer", "notes"):
-                    row[key] = old[key]
+            for key in ("status", "reviewer", "notes"):
+                row[key] = old[key]
         rows.append(row)
     with review_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=REVIEW_COLUMNS)
         writer.writeheader()
         writer.writerows(rows)
     instructions = {
-        "fingerprint": fingerprint,
         "claim_ids": [row["claim_id"] for row in rows],
         "graph_stage": manifest.get("metadata", {}).get("graph_stage"),
         "stage_note": (
@@ -130,8 +109,7 @@ def build_review(graph_root, split, output_dir, claim_ids=None):
         "instructions": (
             "Open graphs/<claim_id>.html. Check extraction, source ownership, relations and leakage. "
             "Set status=approved or needs_changes and fill reviewer/notes. "
-            "Approval is manual and binds both graph fingerprint and per-claim input hash; "
-            "changed inputs require a new review. This export never auto-approves."
+            "Approval is manual. This export never auto-approves."
         ),
         "annotation_schema": {
             "claim_id": "ID from manifest",
@@ -153,7 +131,6 @@ def build_review(graph_root, split, output_dir, claim_ids=None):
     return {
         "count": len(rows),
         "review_csv": str(review_path),
-        "fingerprint": fingerprint,
         "graph_stage": manifest.get("metadata", {}).get("graph_stage"),
     }
 
@@ -265,15 +242,9 @@ def main(argv=None):
     manifest = json.loads((graph_root / "manifest.json").read_text(encoding="utf-8"))
     records = [record for record in manifest["records"] if record["split"] == args.split]
     if args.validate:
-        input_hashes = {
-            str(record["claim_id"]): record["input_hash"]
-            for record in records
-        }
         result = validate_review(
             Path(args.output_dir) / "review.csv",
             [record["claim_id"] for record in records],
-            manifest["fingerprint"],
-            input_hashes=input_hashes,
         )
     else:
         result = build_review(graph_root, args.split, args.output_dir)

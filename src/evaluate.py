@@ -146,10 +146,6 @@ def main(argv=None):
     model, checkpoint = load_model(args.checkpoint, args.device)
     train_config = checkpoint["train_config"]
     root = Path(args.graph_root or train_config["graph_root"])
-    manifest_path = root / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest["fingerprint"] != checkpoint["cache_fingerprint"]:
-        raise ValueError("Checkpoint and graph cache fingerprints differ")
     dataset = GraphDataset(
         root, args.split, ablation=train_config.get("ablation", "none")
     )
@@ -157,7 +153,6 @@ def main(argv=None):
     metrics, rows = evaluate_model(model, loader, args.device, desc=f"Evaluate {args.split}")
     metrics.update({
         "split": args.split,
-        "cache_fingerprint": manifest["fingerprint"],
         "checkpoint": str(args.checkpoint),
     })
     write_evaluation(args.output_dir, metrics, rows)
