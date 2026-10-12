@@ -22,7 +22,6 @@ def build_graphs(
     splits=("train", "val", "test"),
     stage="full",
     limit=None,
-    hf_cache_dir=None,
     encoder=None,
     backend=None,
 ):
@@ -49,24 +48,19 @@ def build_graphs(
         encoder = FeatureEncoder(
             model_id=config.encoder_id,
             device=config.device,
-            cache_dir=hf_cache_dir,
         )
     if stage == "full":
-        if backend is None:
-            backend = QwenBackend(
-                model_id=config.extractor_id,
-                device=config.device,
-                cache_dir=hf_cache_dir,
-                max_new_tokens=config.max_new_tokens,
-                max_image_side=config.max_image_side,
-                seed=config.seed,
-            )
+        backend = QwenBackend(
+            model_id=config.extractor_id,
+            device=config.device,
+            max_new_tokens=config.max_new_tokens,
+            max_image_side=config.max_image_side,
+            seed=config.seed,
+        )
     # Include every gold image so compatibility is stable across split
     # selection and changes when any underlying pixels change.
     all_image_hashes = {}
     for split in ("train", "val", "test"):
-        if not (data_root / split / "Corpus2.csv").exists():
-            continue
         if split not in datasets:
             datasets[split] = MochegDataset(data_root, split)
         for sample in datasets[split].samples:
@@ -287,8 +281,7 @@ def build_graphs(
                     cached_features["errors"].append({"owner": owner, **error})
                 for index, entity in enumerate(extraction["entities"]):
                     cached_features["entity_features"][entity["text"]] = encoded_text(
-                        claim_dir / f"entity_{name}_{index}",
-                        entity["text"]
+                        claim_dir / f"entity_{name}_{index}", entity["text"]
                     )
 
         for image in sample.image_evidence:
@@ -330,7 +323,7 @@ def build_graphs(
                     for index, concept in enumerate(extraction[group]):
                         cached_features["concept_features"][concept] = encoded_text(
                             claim_dir / f"visual_{image.image_id}_{group}_{index}",
-                            concept
+                            concept,
                         )
 
         graph = builder.build(sample, cached_features)
@@ -402,13 +395,14 @@ def main(argv=None):
     parser.add_argument("--cache-root", default="cache")
     parser.add_argument("--graph-root", default="graphs")
     parser.add_argument(
-        "--splits", nargs="+", choices=("train", "val", "test"),
-        default=["train", "val", "test"]
+        "--splits",
+        nargs="+",
+        choices=("train", "val", "test"),
+        default=["train", "val", "test"],
     )
     parser.add_argument("--stage", choices=("features", "full"), default="full")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--hf-cache-dir")
     args = vars(parser.parse_args(argv))
     config = BuildConfig(device=args.pop("device"))
     build_graphs(config=config, **args)

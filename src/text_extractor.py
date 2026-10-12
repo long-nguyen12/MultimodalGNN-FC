@@ -13,13 +13,20 @@ TEXT_PROMPT = (
     'Extract literal named entities from the text. Return ONLY a JSON object: '
     '{"entities": [{"text": "exact substring", "type": "PERSON"}]}. '
     "Each item has text (an exact substring) and type: PERSON, LOCATION, DATE, or ORGANIZATION. "
+    "Use double-quoted JSON strings and escape quotes inside them. "
+    "Return each entity once, with no spans, markdown, comments, or explanation. "
     "Do not infer missing facts, use outside knowledge, assess truthfulness, or return a verdict. "
     'Do not resolve relative dates. Return {"entities": []} when there are no entities.\nText:\n'
 )
 
 
 def parse_json(response):
-    response = re.sub(r"<think>.*?</think>", "", response, flags=re.S).strip()
+    response = response.strip()
+    # A thinking block can start in the prompt, leaving only its closing tag here.
+    if not response.startswith(("{", "[", "```")) and "</think>" in response:
+        response = response.split("</think>", 1)[1].strip()
+    if response.startswith("<think>"):
+        raise ValueError("Incomplete Qwen thinking output")
     if response.startswith("```"):
         response = re.sub(r"^```(?:json)?\s*|\s*```$", "", response, flags=re.I)
     payload = json.loads(response)
@@ -33,14 +40,12 @@ class QwenBackend:
         self,
         model_id="Qwen/Qwen3.5-4B",
         device="cuda",
-        cache_dir=None,
         max_new_tokens=1536,
         max_image_side=1024,
         seed=42,
     ):
         self.model_id = model_id
         self.device = device
-        self.cache_dir = cache_dir
         self.max_new_tokens = max_new_tokens
         self.max_image_side = max_image_side
         self.seed = seed
@@ -77,6 +82,7 @@ class QwenBackend:
         inputs = self.processor(
             text=prompt,
             images=image,
+            add_special_tokens=False,
             return_tensors="pt",
         ).to(self.device)
         pad_token_id = self.processor.tokenizer.pad_token_id
@@ -145,10 +151,10 @@ class TextExtractor:
         aliases = {"GPE": "LOCATION", "LOC": "LOCATION", "ORG": "ORGANIZATION"}
         allowed_types = ("PERSON", "LOCATION", "DATE", "ORGANIZATION")
         for chunk_index, chunk in enumerate(chunks):
+            retry_note = ""
             for attempt in range(2):
-                prompt = TEXT_PROMPT + chunk
-                if attempt:
-                    prompt += "\nReturn a valid JSON object only."
+                prompt = retry_note + TEXT_PROMPT + chunk
+                response = ""
                 try:
                     response = self.backend.generate_text(prompt)
                     payload = parse_json(response)
@@ -182,6 +188,12 @@ class TextExtractor:
                     seen.update(pending_keys)
                     break
                 except (json.JSONDecodeError, ValueError, TypeError) as exc:
+                    retry_note = (
+                        f"Your previous response was invalid: {exc}. "
+                        "Return a complete JSON object matching the schema below.\n"
+                    )
                     if attempt:
-                        errors.append({"chunk": chunk_index, "error": str(exc)})
+                        errors.append(
+                            {"chunk": chunk_index, "error": str(exc), "response": response}
+                        )
         return {"entities": entities, "errors": errors}

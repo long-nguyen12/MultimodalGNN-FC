@@ -8,12 +8,9 @@ from transformers import CLIPModel, CLIPProcessor
 
 
 class FeatureEncoder:
-    def __init__(
-        self, model_id="openai/clip-vit-base-patch32", device="cuda", cache_dir=None
-    ):
+    def __init__(self, model_id="openai/clip-vit-base-patch32", device="cuda"):
         self.model_id = model_id
         self.device = device
-        self.cache_dir = cache_dir
         self.model = None
         self.processor = None
 
